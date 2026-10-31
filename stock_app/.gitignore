@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+# GitHub Actions で DB をコミットする運用にする場合は次の行を消す
+data/
