@@ -6,6 +6,8 @@ matplotlib>=3.8
 requests>=2.31
 python-dotenv>=1.0
 streamlit>=1.40
+altair>=5.0
+reportlab>=4.0
 # 任意: ベイズでベータ推定する場合（--bayes）
 # pymc>=5.10
 # arviz>=0.17
