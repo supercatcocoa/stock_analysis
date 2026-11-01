@@ -13,7 +13,10 @@ EVALUATION_SCHEMA = {
         "verdict": {"type": "string", "enum": VERDICTS},
         "score": {"type": "integer", "description": "0〜100 の総合スコア"},
         "summary": {"type": "string", "description": "3〜4文の総評"},
-        "profitability": {"type": "string", "description": "収益性（ROE・利益率・ROE-WACCスプレッド）の解釈"},
+        "profitability": {
+            "type": "string",
+            "description": "収益性（ROE のデュポン分解・ROIC-WACC スプレッド・利益率）の解釈",
+        },
         "cash_flow": {"type": "string", "description": "キャッシュフローの質の解釈"},
         "growth": {"type": "string", "description": "成長性の解釈"},
         "financial_health": {"type": "string", "description": "財務健全性・資本構成の解釈"},
@@ -31,12 +34,19 @@ EVALUATION_SCHEMA = {
 SYSTEM_PROMPT = """あなたは日本株のファンダメンタル分析を行う慎重なアナリストです。
 与えられた有価証券報告書ベースの集計データだけを根拠に、企業が「長期保有に値する優良企業」かを判定してください。
 
+指標の定義:
+- ROIC = 営業利益 ×（1 − 税率30%）÷（純資産 + 有利子負債）。事業そのものの稼ぐ力を示す。
+- デュポン分解: ROE = 売上高純利益率(net_margin_pct) × 総資産回転率(asset_turnover) × 財務レバレッジ(financial_leverage)。
+  ROE の水準・変化が「利益率」「資産効率」「借入による押し上げ」のどれによるものかを必ず説明すること。
+  レバレッジ主導の高 ROE は質が低いとみなす。
+
 判定の目安:
-- 優良: ROE が WACC を安定的に上回り（価値創造）、営業CF・FCF が概ね黒字、売上・利益が横ばい以上、財務が健全。
+- 優良: ROIC と ROE が WACC を安定的に上回り（価値創造）、営業CF・FCF が概ね黒字、売上・利益が横ばい以上、財務が健全。
 - 要観察: 一部の指標は良いが、一過性の赤字・FCFのマイナス・減収減益など判断を保留すべき要素がある。
-- 非優良: ROE が WACC を継続的に下回る、営業CFが不安定、過大な負債など構造的な懸念がある。
+- 非優良: ROIC・ROE が WACC を継続的に下回る、営業CFが不安定、過大な負債など構造的な懸念がある。
 
 注意:
+- 有利子負債の明細が無い企業は負債合計で代用しているため、ROIC・WACC が実態より低めに出ることがある。
 - 大型買収などで投資CFが一時的に大きくマイナスになった年は、その旨を考慮して解釈すること。
 - 業種特性（金融業の負債構成など）で指標が歪む場合はその点を明記すること。
 - データにない事実（株価水準・ニュース等）は推測しないこと。迷う場合は保守的に「要観察」とする。
@@ -46,8 +56,8 @@ SYSTEM_PROMPT = """あなたは日本株のファンダメンタル分析を行�
 def build_prompt(company: dict, rows: list[dict], summary: dict) -> str:
     table_cols = [
         "period", "revenue_oku", "operating_income_oku", "net_income_oku", "operating_margin_pct",
-        "operating_cf_oku", "investing_cf_oku", "fcf_oku", "roa_pct", "roe_pct", "equity_ratio_pct",
-        "weight_debt", "beta", "wacc_pct",
+        "operating_cf_oku", "investing_cf_oku", "fcf_oku", "roa_pct", "roe_pct", "net_margin_pct",
+        "asset_turnover", "financial_leverage", "roic_pct", "equity_ratio_pct", "weight_debt", "beta", "wacc_pct",
     ]  # fmt: skip
     lines = [" | ".join(table_cols)]
     for r in sorted(rows, key=lambda x: x["period"]):
