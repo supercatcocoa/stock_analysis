@@ -84,6 +84,16 @@ def build_financial_rows(edinet_code: str, records: list[dict], years: int, beta
         cost_of_debt = interest / debt if interest > 0 and debt > 0 else settings.default_cost_of_debt
         wacc = w_e * capm + w_d * cost_of_debt * (1 - settings.tax_rate)
 
+        # ROIC = NOPAT / 投下資本、NOPAT = 営業利益 × (1 − 税率)、投下資本 = 純資産 + 有利子負債
+        invested_capital = net_assets + debt
+        nopat = op_income * (1 - settings.tax_rate)
+        roic = nopat / invested_capital * 100 if invested_capital > 0 else None
+
+        # デュポン分解: ROE = 売上高純利益率 × 総資産回転率 × 財務レバレッジ
+        net_margin = net_income / revenue * 100 if revenue else None
+        asset_turnover = revenue / total_assets if total_assets else None
+        leverage = total_assets / net_assets if net_assets > 0 else None
+
         rows.append(
             {
                 "edinet_code": edinet_code,
@@ -103,6 +113,10 @@ def build_financial_rows(edinet_code: str, records: list[dict], years: int, beta
                 "cost_of_debt": round(cost_of_debt, 4),
                 "beta": round(beta, 3),
                 "wacc_pct": round(wacc * 100, 2),
+                "roic_pct": round(roic, 2) if roic is not None else None,
+                "net_margin_pct": round(net_margin, 2) if net_margin is not None else None,
+                "asset_turnover": round(asset_turnover, 3) if asset_turnover is not None else None,
+                "financial_leverage": round(leverage, 3) if leverage is not None else None,
             }
         )
     return rows
@@ -168,6 +182,19 @@ def _bayes_beta(stock: np.ndarray, market: np.ndarray) -> BetaEstimate | None:
     return BetaEstimate(beta=float(samples.mean()), std=float(samples.std()), method="Bayes(PyMC)")
 
 
+def _get(row, key):
+    """古い DB 行に新しい列が無くても落ちないように取り出す。"""
+    v = row.get(key) if hasattr(row, "get") else None
+    return None if v is None or (isinstance(v, float) and math.isnan(v)) else v
+
+
+def _mean(df: pd.DataFrame, col: str):
+    if col not in df:
+        return None
+    s = df[col].dropna()
+    return round(float(s.mean()), 2) if len(s) else None
+
+
 def summarize(rows: list[dict]) -> dict:
     """Claude に渡す・画面に出すための会社単位のサマリー指標。rows は新しい順。"""
     if not rows:
@@ -187,6 +214,22 @@ def summarize(rows: list[dict]) -> dict:
         "latest_roe_wacc_spread_pct": round(latest["roe_pct"] - latest["wacc_pct"], 2)
         if pd.notna(latest["roe_pct"])
         else None,
+        "latest_roic_pct": _get(latest, "roic_pct"),
+        "avg_roic_pct": _mean(df, "roic_pct"),
+        "latest_roic_wacc_spread_pct": round(latest["roic_pct"] - latest["wacc_pct"], 2)
+        if pd.notna(_get(latest, "roic_pct"))
+        else None,
+        # デュポン分解（年度ごと）: ROE ≒ 純利益率 × 総資産回転率 × 財務レバレッジ
+        "dupont": [
+            {
+                "period": r["period"],
+                "net_margin_pct": _get(r, "net_margin_pct"),
+                "asset_turnover": _get(r, "asset_turnover"),
+                "financial_leverage": _get(r, "financial_leverage"),
+                "roe_pct": r["roe_pct"],
+            }
+            for _, r in df.iterrows()
+        ],
         "fcf_positive_years": f"{int((df['fcf_oku'] > 0).sum())}/{n}",
         "operating_cf_positive_years": f"{int((df['operating_cf_oku'] > 0).sum())}/{n}",
         "latest_operating_margin_pct": latest["operating_margin_pct"],
