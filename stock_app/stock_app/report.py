@@ -218,5 +218,5 @@ def send_report(code: str, db_path=None, sender=None) -> bytes:
     if ev:
         head += f"\n判定: {ev['verdict']}（スコア {ev['score']}）"
     filename = f"{company['sec_code'] or company['edinet_code']}_report_{datetime.now():%Y%m%d}.pdf"
-    sender(head, io.BytesIO(pdf), filename, "application/pdf")
+    sender(head, file=io.BytesIO(pdf), filename=filename, mime="application/pdf")
     return pdf

@@ -165,7 +165,7 @@ def run_watch(dry_run: bool = False, force_notify: bool = False, price_loader=do
             print(f"  🎯 {item['name']} ({sig.ticker}): " + " / ".join(sig.reasons))
             if not dry_run:
                 chart = generate_chart(df, f"{sig.ticker} - last 3 months")
-                sender(msg, chart, f"{sig.ticker}_chart.png")
+                sender(msg, file=chart, filename=f"{sig.ticker}_chart.png")
             db.record_signal(conn, sig.ticker, sig.date, sig.reasons, sig.close, sig.rsi, notified=not dry_run)
 
     print(f"✨ 完了。シグナル {len(hits)} 件")
