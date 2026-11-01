@@ -5,7 +5,7 @@ import streamlit as st
 
 from stock_app import db
 from stock_app.config import settings
-from stock_app.report import METRIC_LABELS
+from stock_app.labels import METRIC_LABELS
 
 st.set_page_config(page_title="優良企業判定 & 株価ウォッチ", page_icon="📈", layout="wide")
 st.title("📈 優良企業判定 & 株価ウォッチ")
@@ -71,7 +71,11 @@ def line_chart(df: pd.DataFrame, cols: list[str], height: int = 300) -> alt.Char
 
 
 def render_report_buttons(edinet_code: str, key: str):
-    from stock_app.report import build_report_for, send_report
+    try:
+        from stock_app.report import build_report_for, send_report
+    except ImportError as e:  # reportlab が未インストールでも画面は動かす
+        st.warning(f"PDF機能を使うには requirements.txt に reportlab を追加してください（{e.name} が見つかりません）")
+        return
 
     c1, c2, _ = st.columns([1, 1, 3])
     try:
