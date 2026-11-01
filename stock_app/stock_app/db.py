@@ -13,6 +13,8 @@ FINANCIAL_COLUMNS = [
     "revenue_oku", "operating_income_oku", "net_income_oku", "operating_cf_oku", "investing_cf_oku",
     "fcf_oku", "operating_margin_pct", "roa_pct", "roe_pct", "equity_ratio_pct", "weight_equity",
     "weight_debt", "cost_of_debt", "beta", "wacc_pct",
+    # ROIC とデュポン分解（後から追加した列。既存 DB には connect() 時に自動で ALTER TABLE する）
+    "roic_pct", "net_margin_pct", "asset_turnover", "financial_leverage",
 ]  # fmt: skip
 
 SCHEMA = f"""
@@ -75,11 +77,20 @@ def connect(db_path: Path | str | None = None):
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    _migrate(conn)
     try:
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate(conn) -> None:
+    """古いバージョンで作った DB に、追加された列を足す。"""
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(financials)")}
+    for col in FINANCIAL_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE financials ADD COLUMN {col} REAL")
 
 
 def upsert_company(conn, info, beta_method: str | None = None) -> None:
