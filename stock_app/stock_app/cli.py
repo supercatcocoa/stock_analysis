@@ -93,6 +93,20 @@ def cmd_report(args) -> int:
     return 0
 
 
+def cmd_db_info(args) -> int:
+    print(f"保存先: {db.backend_name()}")
+    for t, n in db.table_counts().items():
+        print(f"  {t:12s} {n} 件")
+    return 0
+
+
+def cmd_import_sqlite(args) -> int:
+    print(f"{args.path} → {db.backend_name()} にコピーします")
+    for t, n in db.import_sqlite(args.path).items():
+        print(f"  {t:12s} {n} 件")
+    return 0
+
+
 def cmd_test_discord(args) -> int:
     from .discord import send
 
@@ -129,6 +143,10 @@ def main(argv=None) -> int:
     s.add_argument("code")
     s.set_defaults(func=cmd_show)
     sub.add_parser("test-discord", help="Discord 通知テスト").set_defaults(func=cmd_test_discord)
+    sub.add_parser("db-info", help="保存先（Turso / SQLite）と件数を表示").set_defaults(func=cmd_db_info)
+    im = sub.add_parser("import-sqlite", help="ローカルの SQLite ファイルの中身を Turso にコピー")
+    im.add_argument("path", help="例: data/stock_app.db")
+    im.set_defaults(func=cmd_import_sqlite)
 
     args = p.parse_args(argv)
     return args.func(args)

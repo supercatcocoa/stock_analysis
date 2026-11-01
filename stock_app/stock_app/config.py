@@ -24,9 +24,18 @@ class Settings:
 
     # --- Claude ---
     claude_model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5"))
-    claude_max_tokens: int = 5000
+    # 判定文（日本語 JSON）の出力上限。切れた場合は自動で 2 倍にして 1 回だけ再試行する
+    claude_max_tokens: int = field(default_factory=lambda: int(os.getenv("CLAUDE_MAX_TOKENS", "8000")))
 
     # --- 保存先 ---
+    # Turso を使う場合（推奨）: URL とトークンを設定すると Turso に保存する
+    turso_database_url: str = field(default_factory=lambda: os.getenv("TURSO_DATABASE_URL", ""))
+    turso_auth_token: str = field(default_factory=lambda: os.getenv("TURSO_AUTH_TOKEN", ""))
+    # Turso の読み取り用に手元へ置く複製ファイル（消えても次回接続時に再同期される）
+    turso_replica_path: Path = field(
+        default_factory=lambda: Path(os.getenv("TURSO_REPLICA_PATH", str(PROJECT_ROOT / "data" / "turso_replica.db")))
+    )
+    # Turso 未設定時のローカル SQLite
     db_path: Path = field(
         default_factory=lambda: Path(os.getenv("DB_PATH", str(PROJECT_ROOT / "data" / "stock_app.db")))
     )

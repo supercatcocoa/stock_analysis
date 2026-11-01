@@ -1,4 +1,9 @@
-"""SQLite への保存。財務データは (edinet_code, period) をキーに Upsert する。"""
+"""DB への保存。財務データは (edinet_code, period) をキーに Upsert する。
+
+TURSO_DATABASE_URL が設定されていれば Turso（クラウドの SQLite 互換 DB）に保存し、
+Streamlit Cloud と GitHub Actions など複数の実行環境で同じデータを共有する。
+未設定ならローカルの SQLite ファイル（DB_PATH）に保存する。
+"""
 from __future__ import annotations
 
 import json
@@ -6,6 +11,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .config import settings
 
@@ -66,28 +72,67 @@ CREATE TABLE IF NOT EXISTS signals (
 """
 
 
+JST = ZoneInfo("Asia/Tokyo")
+
+
 def now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    # 実行環境（Streamlit Cloud / GitHub Actions は UTC）に関係なく日本時間で記録する
+    return datetime.now(JST).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def backend_name(db_path=None) -> str:
+    return "Turso" if settings.turso_database_url and db_path is None else f"SQLite ({db_path or settings.db_path})"
+
+
+def _open(db_path):
+    if settings.turso_database_url and db_path is None:
+        import libsql  # pip install libsql
+
+        replica = Path(settings.turso_replica_path)
+        replica.parent.mkdir(parents=True, exist_ok=True)
+        # Embedded replica: 読み取りは手元の複製、書き込みは Turso 本体へ送られる
+        conn = libsql.connect(
+            str(replica), sync_url=settings.turso_database_url, auth_token=settings.turso_auth_token
+        )
+        conn.sync()  # 他の環境で書かれた最新データを取り込む
+        return conn
+    path = Path(db_path or settings.db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return sqlite3.connect(path)
 
 
 @contextmanager
 def connect(db_path: Path | str | None = None):
-    path = Path(db_path or settings.db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
-    conn.row_factory = sqlite3.Row
-    conn.executescript(SCHEMA)
+    """db_path を明示した場合（テストなど）は常にローカル SQLite を使う。"""
+    conn = _open(db_path)
+    for stmt in SCHEMA.split(";"):
+        if stmt.strip():
+            conn.execute(stmt)
     _migrate(conn)
+    conn.commit()
     try:
         yield conn
         conn.commit()
     finally:
-        conn.close()
+        close = getattr(conn, "close", None)
+        if close:
+            close()
+
+
+def _dicts(cur) -> list[dict]:
+    """sqlite3 / libsql どちらのカーソルでも、列名つき dict のリストにする。"""
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _one(cur) -> dict | None:
+    rows = _dicts(cur)
+    return rows[0] if rows else None
 
 
 def _migrate(conn) -> None:
     """古いバージョンで作った DB に、追加された列を足す。"""
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(financials)")}
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(financials)").fetchall()}
     for col in FINANCIAL_COLUMNS:
         if col not in existing:
             conn.execute(f"ALTER TABLE financials ADD COLUMN {col} REAL")
@@ -149,20 +194,21 @@ def _upsert_rows(conn, rows: list[dict]) -> None:
 
 def get_financials(conn, edinet_code: str) -> list[dict]:
     cur = conn.execute("SELECT * FROM financials WHERE edinet_code=? ORDER BY period DESC", (edinet_code,))
-    return [dict(r) for r in cur.fetchall()]
+    return _dicts(cur)
 
 
 def get_company(conn, edinet_code: str) -> dict | None:
-    r = conn.execute("SELECT * FROM companies WHERE edinet_code=?", (edinet_code,)).fetchone()
-    return dict(r) if r else None
+    return _one(conn.execute("SELECT * FROM companies WHERE edinet_code=?", (edinet_code,)))
 
 
 def find_company(conn, code: str) -> dict | None:
     code = code.strip().upper().removesuffix(".T")
-    r = conn.execute(
-        "SELECT * FROM companies WHERE edinet_code=? OR sec_code=? OR name LIKE ?", (code, code, f"%{code}%")
-    ).fetchone()
-    return dict(r) if r else None
+    return _one(
+        conn.execute(
+            "SELECT * FROM companies WHERE edinet_code=? OR sec_code=? OR name LIKE ? LIMIT 1",
+            (code, code, f"%{code}%"),
+        )
+    )
 
 
 def insert_evaluation(conn, edinet_code: str, model: str, result: dict, metrics: dict) -> None:
@@ -179,12 +225,9 @@ def insert_evaluation(conn, edinet_code: str, model: str, result: dict, metrics:
 
 
 def latest_evaluation(conn, edinet_code: str) -> dict | None:
-    r = conn.execute(
-        "SELECT * FROM evaluations WHERE edinet_code=? ORDER BY id DESC LIMIT 1", (edinet_code,)
-    ).fetchone()
-    if not r:
+    d = _one(conn.execute("SELECT * FROM evaluations WHERE edinet_code=? ORDER BY id DESC LIMIT 1", (edinet_code,)))
+    if not d:
         return None
-    d = dict(r)
     d["detail"] = json.loads(d.pop("detail_json") or "{}")
     return d
 
@@ -206,7 +249,7 @@ def set_watch(conn, edinet_code: str, ticker: str, name: str, active: bool) -> N
 
 
 def active_watchlist(conn) -> list[dict]:
-    return [dict(r) for r in conn.execute("SELECT * FROM watchlist WHERE active=1 ORDER BY ticker").fetchall()]
+    return _dicts(conn.execute("SELECT * FROM watchlist WHERE active=1 ORDER BY ticker"))
 
 
 def list_companies(conn) -> list[dict]:
@@ -218,7 +261,7 @@ def list_companies(conn) -> list[dict]:
            LEFT JOIN watchlist w ON w.edinet_code = c.edinet_code
            ORDER BY e.score DESC NULLS LAST, c.ticker"""
     )
-    return [dict(r) for r in cur.fetchall()]
+    return _dicts(cur)
 
 
 def signal_already_sent(conn, ticker: str, signal_date: str) -> bool:
@@ -235,3 +278,35 @@ def record_signal(conn, ticker: str, signal_date: str, reasons: list[str], close
              rsi=excluded.rsi, notified_at=COALESCE(excluded.notified_at, signals.notified_at)""",
         (ticker, signal_date, " / ".join(reasons), close, rsi, now() if notified else None),
     )
+
+
+TABLES = ["companies", "financials", "evaluations", "watchlist", "signals"]
+
+
+def import_sqlite(src_path: str, db_path=None) -> dict[str, int]:
+    """ローカルの SQLite ファイルの内容を、現在の保存先（Turso など）へコピーする。既存行は上書き。"""
+    src = sqlite3.connect(src_path)
+    counts = {}
+    with connect(db_path) as dst:
+        for table in TABLES:
+            try:
+                cur = src.execute(f"SELECT * FROM {table}")
+            except sqlite3.OperationalError:
+                continue  # 古い DB に無いテーブル
+            rows = _dicts(cur)
+            if not rows:
+                counts[table] = 0
+                continue
+            dst_cols = {r[1] for r in dst.execute(f"PRAGMA table_info({table})").fetchall()}
+            cols = [c for c in rows[0] if c in dst_cols]
+            sql = f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})"
+            for r in rows:
+                dst.execute(sql, [r[c] for c in cols])
+            counts[table] = len(rows)
+    src.close()
+    return counts
+
+
+def table_counts(db_path=None) -> dict[str, int]:
+    with connect(db_path) as conn:
+        return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchall()[0][0] for t in TABLES}
