@@ -37,7 +37,8 @@ class Settings:
 
     # --- 資本コストの前提（ノートブックと同じ値） ---
     market_index: str = "^N225"
-    risk_free_rate: float = 0.005
+    # 安全資産利回り（日本10年国債）。.env の RISK_FREE_RATE=0.028 のように上書き可
+    risk_free_rate: float = field(default_factory=lambda: float(os.getenv("RISK_FREE_RATE", "0.025")))
     market_risk_premium: float = 0.06
     tax_rate: float = 0.30
     default_cost_of_debt: float = 0.015
