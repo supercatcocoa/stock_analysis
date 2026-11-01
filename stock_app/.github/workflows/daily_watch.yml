@@ -1,0 +1,32 @@
+# 毎営業日、ウォッチリスト（Turso に保存）の株価をチェックして Discord に送る。PC は不要。
+# リポジトリの Settings > Secrets and variables > Actions に次の 5 つを登録する:
+#   EDINETDB_API_KEY / ANTHROPIC_API_KEY / DISCORD_WEBHOOK_URL / TURSO_DATABASE_URL / TURSO_AUTH_TOKEN
+name: daily-watch
+
+on:
+  schedule:
+    - cron: "0 7 * * 1-5" # 平日 16:00 JST（東証の大引け後）。GitHub 側の混雑で数十分遅れることがある
+  workflow_dispatch: # Actions 画面の「Run workflow」で手動実行もできる
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        # app.py と requirements.txt があるフォルダ（リポジトリ直下なら "."）
+        working-directory: stock_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: stock_app/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: python -m stock_app watch
+        env:
+          EDINETDB_API_KEY: ${{ secrets.EDINETDB_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
