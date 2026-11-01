@@ -22,27 +22,7 @@ from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, S
 
 from . import db  # noqa: E402
 
-# 画面・PDF 共通の列ラベル
-METRIC_LABELS = {
-    "revenue_oku": "売上高（億円）",
-    "operating_income_oku": "営業利益（億円）",
-    "net_income_oku": "純利益（億円）",
-    "operating_margin_pct": "営業利益率（%）",
-    "operating_cf_oku": "営業CF（億円）",
-    "investing_cf_oku": "投資CF（億円）",
-    "fcf_oku": "FCF（億円）",
-    "roa_pct": "ROA（%）",
-    "roe_pct": "ROE（%）",
-    "net_margin_pct": "　└ 売上高純利益率（%）",
-    "asset_turnover": "　└ 総資産回転率（回）",
-    "financial_leverage": "　└ 財務レバレッジ（倍）",
-    "roic_pct": "ROIC（%）",
-    "wacc_pct": "WACC（%）",
-    "equity_ratio_pct": "自己資本比率（%）",
-    "weight_debt": "D/V（有利子負債比率）",
-    "cost_of_debt": "負債コスト（%）",
-    "beta": "Beta",
-}
+from .labels import METRIC_LABELS  # noqa: E402,F401  (画面・PDF 共通)
 
 # 表示時の倍率と書式（負債コストは小数→%表示、Beta は 3 桁）
 DISPLAY_FORMAT = {
