@@ -78,15 +78,33 @@ def evaluate_company(company: dict, rows: list[dict], summary: dict, client=None
 
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key or None)
 
-    response = client.messages.create(
-        model=settings.claude_model,
-        max_tokens=settings.claude_max_tokens,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": build_prompt(company, rows, summary)}],
-        output_config={"format": {"type": "json_schema", "schema": EVALUATION_SCHEMA}},
-    )
-    text = next(b.text for b in response.content if getattr(b, "type", "") == "text")
-    result = json.loads(text)
+    prompt = build_prompt(company, rows, summary)
+    max_tokens = settings.claude_max_tokens
+    for attempt in range(2):
+        response = client.messages.create(
+            model=settings.claude_model,
+            max_tokens=max_tokens,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": prompt}],
+            output_config={"format": {"type": "json_schema", "schema": EVALUATION_SCHEMA}},
+        )
+        # 出力上限に達すると JSON が途中で切れるので、上限を 2 倍にして再試行
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            if attempt == 0:
+                print(f"⚠️ 判定文が出力上限 ({max_tokens} トークン) で切れたため、上限を増やして再試行します")
+                max_tokens *= 2
+                continue
+            raise RuntimeError(
+                f"Claude の判定文が出力上限 ({max_tokens} トークン) を超えました。"
+                ".env の CLAUDE_MAX_TOKENS を増やしてください"
+            )
+        break
+
+    text = "".join(b.text for b in response.content if getattr(b, "type", "") == "text")
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Claude の判定結果を JSON として読めませんでした: {e} / 先頭: {text[:200]}") from e
     result["score"] = max(0, min(100, int(result["score"])))
     result["is_excellent"] = result["verdict"] == "優良"
     return result
