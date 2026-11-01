@@ -16,6 +16,10 @@ missing = [k for k, v in {"EDINETDB_API_KEY": settings.edinetdb_api_key,
 if missing:
     st.warning("未設定の環境変数: " + ", ".join(missing) + "（.env に記入してください）")
 
+st.caption(f"データの保存先: {db.backend_name()}")
+if "SQLite" in db.backend_name():
+    st.info("TURSO_DATABASE_URL が未設定のため、データはこのサーバー内に保存されます（再起動で消えます）")
+
 tab_analyze, tab_list, tab_watch = st.tabs(["🔎 企業を判定", "🗂 保存済み企業", "👀 株価ウォッチ"])
 
 

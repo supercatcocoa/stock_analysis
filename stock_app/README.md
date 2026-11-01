@@ -24,6 +24,12 @@ python -m stock_app analyze 6723 --force     # 決算に更新が無くても再
 python -m stock_app analyze 6723 --bayes     # ベータを PyMC で推定（要 pip install pymc arviz）
 python -m stock_app analyze 6723 --notify    # 優良判定の追加/解除を Discord に通知
 
+python -m stock_app analyze 6723 --pdf       # 判定後に PDF レポートを Discord に送信
+
+# 保存済みの判定を PDF 化して Discord に送る
+python -m stock_app report 6723
+python -m stock_app report 6723 -o report.pdf --no-send   # 送らずファイル保存だけ
+
 python -m stock_app list         # 保存済み企業・判定・ウォッチ状況
 python -m stock_app show 6723    # 年度別データと判定の詳細
 
@@ -47,20 +53,32 @@ SQLite（`data/stock_app.db`）に保存。
 
 **Claude の再判定は「決算データ（売上・利益・CF 等）に新規期の追加や修正があったとき」だけ**行う。β・WACC は株価で毎回わずかに変わるが、それだけでは再判定しない（API 費用の節約）。定期的に `analyze` を流しておけば、新しい有報が出た企業だけ自動で再判定される。
 
-## 毎日の自動実行
+## データの保存先（Turso）
 
-東証の大引け（15:30）後に実行する。
+`.env`（または Streamlit Cloud の Secrets）に `TURSO_DATABASE_URL` と `TURSO_AUTH_TOKEN` を設定すると、データを Turso に保存する。
+Streamlit Cloud・GitHub Actions・自分の PC のどこから実行しても同じデータを読み書きするので、画面で優良判定した企業が、翌日の自動チェックの対象に入る。未設定の場合はローカルの `data/stock_app.db` に保存する。
 
-**Mac / Linux（cron）**
-```cron
-# 平日 16:00 に株価ウォッチ、毎週日曜 9:00 に財務データの更新チェック
-0 16 * * 1-5 cd /path/to/stock_app && /usr/bin/python3 -m stock_app watch >> data/watch.log 2>&1
-0 9  * * 0   cd /path/to/stock_app && /usr/bin/python3 -m stock_app analyze 6723 8035 6141 >> data/analyze.log 2>&1
+```bash
+# Turso CLI（https://docs.turso.tech）で DB を作り、URL とトークンを取得
+turso db create stock-app
+turso db show --url stock-app        # → TURSO_DATABASE_URL
+turso db tokens create stock-app     # → TURSO_AUTH_TOKEN
+
+python -m stock_app db-info                          # 保存先と件数の確認
+python -m stock_app import-sqlite data/stock_app.db  # 手元の SQLite のデータを Turso に移す（任意）
 ```
 
-**Windows** … タスク スケジューラで `python -m stock_app watch` を平日 16:00 に登録。
+## 毎日の自動実行（GitHub Actions・PC 不要）
 
-**GitHub Actions（PC 不要）** … `.github/workflows/daily_watch.yml` を同梱。Secrets に 3 つのキーを登録し、`.gitignore` の `data/` 行を消して DB をコミットする運用にする。
+`.github/workflows/daily_watch.yml` が平日 16:00 JST に `watch` を実行する。
+
+1. `.github` フォルダは**リポジトリの一番上**に置く（`app.py` と同じ `stock_app/` の中では動かない）
+2. `app.py` がリポジトリ直下にある場合は、yml の `working-directory: stock_app` を `.` に変える
+3. GitHub の Settings → Secrets and variables → Actions に次の 5 つを登録する
+   `EDINETDB_API_KEY` / `ANTHROPIC_API_KEY` / `DISCORD_WEBHOOK_URL` / `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN`
+4. Actions タブ → daily-watch → 「Run workflow」で手動実行して動作を確認する
+
+自分の PC で動かしたい場合は cron（Mac/Linux）やタスク スケジューラ（Windows）で `python -m stock_app watch` を登録してもよい。ただしスリープ中は動かない。
 
 ## 判定ロジック
 
