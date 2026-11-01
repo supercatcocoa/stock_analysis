@@ -78,7 +78,12 @@ def test_rows_and_summary():
     assert r["fcf_oku"] == 3300.0 and r["roe_pct"] == pytest.approx(8.33, abs=0.01)
     # 有利子負債 = 短期+長期借入 = 6000億 → D/V = 0.6/(1.8+0.6)
     assert r["weight_debt"] == pytest.approx(0.25)
+    # ROIC = 2000億×0.7 / (1.8兆+6000億) = 5.83%
+    assert r["roic_pct"] == pytest.approx(5.83, abs=0.01)
+    # デュポン分解の積が ROE と一致する
+    assert r["net_margin_pct"] * r["asset_turnover"] * r["financial_leverage"] == pytest.approx(r["roe_pct"], abs=0.02)
     s = summarize(rows)
+    assert s["latest_roic_wacc_spread_pct"] is not None and len(s["dupont"]) == 3
     assert s["fcf_positive_years"] == "3/3" and s["latest_roe_wacc_spread_pct"] is not None
 
 
@@ -103,6 +108,36 @@ def test_analyze_upsert_and_reuse(dbp):
     with db.connect(dbp) as conn:
         assert db.active_watchlist(conn) == []
         assert len(db.get_financials(conn, "E02081")) == 4  # 2023〜2026 が保存されている
+
+
+def test_migrate_old_db(dbp):
+    """ROIC 列が無い旧 DB でも列が追加され、次回 analyze で一度だけ再判定される。"""
+    import sqlite3
+
+    old_cols = [c for c in db.FINANCIAL_COLUMNS if c not in ("roic_pct", "net_margin_pct", "asset_turnover",
+                                                             "financial_leverage")]  # fmt: skip
+    con = sqlite3.connect(dbp)
+    con.execute(f"CREATE TABLE financials (edinet_code TEXT, period TEXT, {', '.join(c + ' REAL' for c in old_cols)},"
+                " updated_at TEXT, PRIMARY KEY (edinet_code, period))")  # fmt: skip
+    con.commit()
+    con.close()
+    claude = FakeClaude()
+    analyze_company("6723", edinet_client=FakeEdinet(), claude_client=claude, beta_estimator=fake_beta(1.0), db_path=dbp)
+    with db.connect(dbp) as conn:
+        assert db.get_financials(conn, "E02081")[0]["roic_pct"] == pytest.approx(5.83, abs=0.01)
+    assert "roic_pct" in claude.last_kwargs["messages"][0]["content"]
+
+
+def test_report_pdf_sent(dbp):
+    from stock_app.report import send_report
+
+    analyze_company("6723", edinet_client=FakeEdinet(), claude_client=FakeClaude(), beta_estimator=fake_beta(1.0),
+                    db_path=dbp)  # fmt: skip
+    sent = []
+    pdf = send_report("6723", db_path=dbp, sender=lambda m, f, fn, mime: sent.append((m, f.getvalue(), fn, mime)))
+    assert pdf.startswith(b"%PDF") and len(pdf) > 10_000
+    msg, body, fn, mime = sent[0]
+    assert mime == "application/pdf" and fn.endswith(".pdf") and body == pdf and "優良" in msg
 
 
 def make_prices(kind):
@@ -130,4 +165,3 @@ def test_watch_notifies_once(dbp):
     assert "ルネサス" in sent[0][0] and "財務判定: 優良" in sent[0][0] and sent[0][1] == b"\x89PNG"
     run_watch(price_loader=loader, sender=sender, db_path=dbp)  # 同じ日の再実行
     assert len(sent) == 1  # 重複通知しない
-
