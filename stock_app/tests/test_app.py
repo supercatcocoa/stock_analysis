@@ -38,7 +38,9 @@ class FakeEdinet:
 
 
 class FakeClaude:
-    def __init__(self, verdict="優良", score=78):
+    def __init__(self, verdict="優良", score=78, truncate_first=False):
+        self.truncate_first = truncate_first
+        self.max_tokens_seen = []
         self.calls = 0
         self.verdict, self.score = verdict, score
         self.messages = self
@@ -46,12 +48,17 @@ class FakeClaude:
     def create(self, **kw):
         self.calls += 1
         self.last_kwargs = kw
+        self.max_tokens_seen.append(kw["max_tokens"])
+        if self.truncate_first and self.calls == 1:
+            return SimpleNamespace(stop_reason="max_tokens",
+                                   content=[SimpleNamespace(type="text", text='{"verdict": "優良", "summary": "途中')])
         out = {
             "verdict": self.verdict, "score": self.score, "summary": "ROEがWACCを上回る。",
             "profitability": "良好", "cash_flow": "安定", "growth": "横ばい", "financial_health": "健全",
             "strengths": ["高ROE"], "risks": ["市況"], "watch_points": ["在庫"],
         }  # fmt: skip
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text=json.dumps(out, ensure_ascii=False))])
+        return SimpleNamespace(stop_reason="end_turn",
+                               content=[SimpleNamespace(type="text", text=json.dumps(out, ensure_ascii=False))])
 
 
 def fake_beta(beta):
@@ -128,13 +135,23 @@ def test_migrate_old_db(dbp):
     assert "roic_pct" in claude.last_kwargs["messages"][0]["content"]
 
 
+def test_truncated_output_retried():
+    from stock_app.analyst import evaluate_company
+
+    claude = FakeClaude(truncate_first=True)
+    rows = build_financial_rows("E02081", FakeEdinet().records, 3, beta=1.0)
+    result = evaluate_company({"name": "x"}, rows, summarize(rows), client=claude)
+    assert result["verdict"] == "優良" and claude.calls == 2
+    assert claude.max_tokens_seen[1] == claude.max_tokens_seen[0] * 2
+
+
 def test_report_pdf_sent(dbp):
     from stock_app.report import send_report
 
     analyze_company("6723", edinet_client=FakeEdinet(), claude_client=FakeClaude(), beta_estimator=fake_beta(1.0),
                     db_path=dbp)  # fmt: skip
     sent = []
-    pdf = send_report("6723", db_path=dbp, sender=lambda m, f, fn, mime: sent.append((m, f.getvalue(), fn, mime)))
+    pdf = send_report("6723", db_path=dbp, sender=lambda m, file, filename, mime: sent.append((m, file.getvalue(), filename, mime)))
     assert pdf.startswith(b"%PDF") and len(pdf) > 10_000
     msg, body, fn, mime = sent[0]
     assert mime == "application/pdf" and fn.endswith(".pdf") and body == pdf and "優良" in msg
@@ -158,10 +175,62 @@ def test_watch_notifies_once(dbp):
     analyze_company("6723", edinet_client=FakeEdinet(), claude_client=FakeClaude(), beta_estimator=fake_beta(1.0),
                     db_path=dbp)  # fmt: skip
     sent = []
-    sender = lambda msg, img, fn: sent.append((msg, img.getvalue()[:4], fn))  # noqa: E731
+    sender = lambda msg, file, filename: sent.append((msg, file.getvalue()[:4], filename))  # noqa: E731
     loader = lambda tickers: {t: make_prices("golden") for t in tickers}  # noqa: E731
     hits = run_watch(price_loader=loader, sender=sender, db_path=dbp)
     assert len(hits) == 1 and len(sent) == 1
     assert "ルネサス" in sent[0][0] and "財務判定: 優良" in sent[0][0] and sent[0][1] == b"\x89PNG"
     run_watch(price_loader=loader, sender=sender, db_path=dbp)  # 同じ日の再実行
     assert len(sent) == 1  # 重複通知しない
+
+
+def test_turso_backend(tmp_path, monkeypatch):
+    """TURSO_DATABASE_URL 設定時は libsql 経由で接続する。sqlite3.Row に頼らず動くことも確認。"""
+    import sqlite3
+    import sys
+    import types
+
+    from stock_app.config import settings
+
+    calls = {}
+
+    class FakeLibsqlConn:  # libsql の接続を模したもの（row_factory は持たない）
+        def __init__(self, path, sync_url, auth_token):
+            calls.update(path=path, sync_url=sync_url, auth_token=auth_token, syncs=0)
+            self._c = sqlite3.connect(path)
+
+        def sync(self):
+            calls["syncs"] += 1
+
+        def execute(self, *a):
+            return self._c.execute(*a)
+
+        def commit(self):
+            self._c.commit()
+
+        def close(self):
+            self._c.close()
+
+    monkeypatch.setitem(sys.modules, "libsql", types.SimpleNamespace(connect=FakeLibsqlConn))
+    monkeypatch.setattr(settings, "turso_database_url", "libsql://test.turso.io")
+    monkeypatch.setattr(settings, "turso_auth_token", "tok")
+    monkeypatch.setattr(settings, "turso_replica_path", tmp_path / "replica.db")
+
+    # 既存のローカル SQLite を作ってから Turso にインポート
+    local = tmp_path / "local.db"
+    analyze_company("6723", edinet_client=FakeEdinet(), claude_client=FakeClaude(), beta_estimator=fake_beta(1.0),
+                    db_path=local)  # fmt: skip
+    counts = db.import_sqlite(str(local))
+    assert counts["financials"] == 3 and counts["watchlist"] == 1
+    assert calls["sync_url"] == "libsql://test.turso.io" and calls["syncs"] >= 1
+    assert db.backend_name() == "Turso"
+
+    # Turso 側のデータでウォッチと判定参照が動く
+    with db.connect() as conn:
+        assert [w["ticker"] for w in db.active_watchlist(conn)] == ["6723.T"]
+        assert db.latest_evaluation(conn, "E02081")["verdict"] == "優良"
+        assert db.find_company(conn, "6723")["name"] == "ルネサスエレクトロニクス"
+    sent = []
+    run_watch(price_loader=lambda t: {x: make_prices("golden") for x in t},
+              sender=lambda m, file, filename: sent.append(m))  # fmt: skip
+    assert len(sent) == 1
