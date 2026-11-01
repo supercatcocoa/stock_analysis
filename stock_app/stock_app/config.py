@@ -24,7 +24,7 @@ class Settings:
 
     # --- Claude ---
     claude_model: str = field(default_factory=lambda: os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5"))
-    claude_max_tokens: int = 2000
+    claude_max_tokens: int = 5000
 
     # --- 保存先 ---
     db_path: Path = field(
