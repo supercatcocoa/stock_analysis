@@ -12,6 +12,7 @@ import pandas as pd  # noqa: E402
 
 from . import db  # noqa: E402
 from .config import settings  # noqa: E402
+from .rebound import BottomCheck, check_bottom  # noqa: E402
 
 try:  # 日本語フォント（無くても動く）
     import japanize_matplotlib  # noqa: F401
@@ -35,11 +36,20 @@ class Signal:
     rsi: float
     sma_short: float
     sma_long: float
-    reasons: list[str]
+    reasons: list[str]  # 買いシグナル（GC / 押し目）
+    oversold: bool = False  # 本日 RSI が売られすぎ水準を下回っている
+    oversold_cross: bool = False  # 本日、売られすぎ水準を新たに下抜けた（前日は水準以上）
+    rebound_started: bool = False  # 本日、下げ止まり監視を開始した
+    bottom: "BottomCheck | None" = None  # 下げ止まり監視中の判定結果
+    bottom_notified: bool = False  # 本日、下げ止まりサインとして通知対象になった
 
     @property
     def is_buy(self) -> bool:
         return bool(self.reasons)
+
+    @property
+    def should_notify(self) -> bool:
+        return self.is_buy or self.rebound_started or self.bottom_notified
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -51,7 +61,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def detect_signal(ticker: str, df: pd.DataFrame) -> Signal | None:
-    """ノートブックと同じ判定（短期GC / 上昇トレンド中の押し目）＋売られすぎ。"""
+    """ノートブックと同じ判定（短期GC / 上昇トレンド中の押し目）と、売られすぎかどうか。"""
     df = df.dropna(subset=["Close"])
     if len(df) < settings.sma_long + 50:
         return None
@@ -63,8 +73,6 @@ def detect_signal(ticker: str, df: pd.DataFrame) -> Signal | None:
         reasons.append(f"ゴールデンクロス (SMA{settings.sma_short}がSMA{settings.sma_long}を上抜け)")
     if last["Close"] > last["SMA_L"] and last["RSI"] < settings.rsi_pullback_max:
         reasons.append(f"上昇トレンド中の押し目 (終値>SMA{settings.sma_long} かつ RSI<{settings.rsi_pullback_max:.0f})")
-    if last["RSI"] < settings.rsi_oversold:
-        reasons.append(f"売られすぎ (RSI<{settings.rsi_oversold:.0f})")
 
     return Signal(
         ticker=ticker,
@@ -74,6 +82,8 @@ def detect_signal(ticker: str, df: pd.DataFrame) -> Signal | None:
         sma_short=float(last["SMA_S"]),
         sma_long=float(last["SMA_L"]),
         reasons=reasons,
+        oversold=bool(last["RSI"] < settings.rsi_oversold),
+        oversold_cross=bool(prev["RSI"] >= settings.rsi_oversold > last["RSI"]),
     )
 
 
@@ -113,15 +123,38 @@ def download_prices(tickers: list[str]) -> dict[str, pd.DataFrame]:
     return out
 
 
-def build_message(sig: Signal, item: dict, evaluation: dict | None) -> str:
+def build_message(sig: Signal, item: dict, evaluation: dict | None, rebound: dict | None = None) -> str:
+    titles = []
+    if sig.is_buy:
+        titles.append("📈 買いチャンス検知")
+    if sig.bottom_notified:
+        titles.append("🔄 下げ止まりサイン")
+    if sig.rebound_started:
+        titles.append("⚠️ 売られすぎ検知 → 下げ止まり監視を開始")
     lines = [
-        "【📈 買いチャンス検知】",
+        "【" + " ／ ".join(titles) + "】",
         f"・企業名: **{item['name']}** ({sig.ticker})",
         f"・終値: ¥{sig.close:,.1f}（{sig.date}）",
         f"・RSI({settings.rsi_window}): {sig.rsi:.1f} / SMA{settings.sma_short}: {sig.sma_short:,.1f} / "
         f"SMA{settings.sma_long}: {sig.sma_long:,.1f}",
-        "・シグナル: " + " / ".join(sig.reasons),
     ]
+    if sig.is_buy:
+        lines.append("・シグナル: " + " / ".join(sig.reasons))
+    if sig.bottom_notified and sig.bottom and rebound:
+        b = sig.bottom
+        lines += [
+            f"・下げ止まりサイン {b.score}/5（{settings.bottom_min_signals}つ以上で通知）",
+            *[f"　✅ {m}" for m in b.met],
+            f"・監視開始 {rebound['started_date']}（¥{rebound['start_close']:,.1f}, RSI {rebound['start_rsi']:.1f}）"
+            f"から {b.days_since_start} 営業日",
+            f"・最安値 ¥{b.low_close:,.1f}（{b.low_date}, 開始時比 {b.drawdown_pct:+.1f}%）"
+            f" → 現在 開始時比 {b.change_from_start_pct:+.1f}%",
+        ]
+    if sig.rebound_started:
+        lines.append(
+            f"・RSI が {settings.rsi_oversold:.0f} を割りました。すぐには買わず、下げ止まりサインが"
+            f" {settings.bottom_min_signals} つそろった時点で改めて通知します（最長 {settings.oversold_watch_days} 営業日）"
+        )
     if evaluation:
         lines.append(f"・財務判定: {evaluation['verdict']}（スコア {evaluation['score']}, {evaluation['evaluated_at'][:10]}）")
         lines.append(f"> {evaluation['summary']}")
@@ -129,9 +162,40 @@ def build_message(sig: Signal, item: dict, evaluation: dict | None) -> str:
     return "\n".join(lines)
 
 
+def _update_rebound_state(conn, sig: Signal, item: dict, df: pd.DataFrame, persist: bool) -> dict | None:
+    """売られすぎ → 下げ止まり監視の状態を進める。persist=False（dry-run）なら DB を変えない。"""
+    entry = db.get_rebound(conn, sig.ticker)
+    watching = entry is not None and entry["status"] == "watching"
+
+    if watching:
+        bottom = check_bottom(add_indicators(df), entry)
+        if bottom is not None:
+            sig.bottom = bottom
+            if bottom.is_bottom:
+                sig.bottom_notified = True
+                if persist:
+                    db.update_rebound(conn, sig.ticker, status="bottomed", ended_date=sig.date,
+                                      last_score=bottom.score, low_close=bottom.low_close, low_date=bottom.low_date)  # fmt: skip
+            elif bottom.days_since_start >= settings.oversold_watch_days:
+                print(f"  ⌛ {item['name']}: {settings.oversold_watch_days} 営業日たっても下げ止まらず監視終了")
+                if persist:
+                    db.update_rebound(conn, sig.ticker, status="expired", ended_date=sig.date,
+                                      last_score=bottom.score, low_close=bottom.low_close, low_date=bottom.low_date)  # fmt: skip
+            elif persist:
+                db.update_rebound(conn, sig.ticker, last_score=bottom.score,
+                                  low_close=bottom.low_close, low_date=bottom.low_date)  # fmt: skip
+    # 初めての銘柄は売られすぎなら開始。監視を終えた銘柄は、新たに水準を下抜けた日だけ再開する
+    elif (entry is None and sig.oversold) or (entry is not None and sig.oversold_cross):
+        sig.rebound_started = True
+        if persist:
+            db.start_rebound(conn, item, sig.date, sig.close, sig.rsi)
+        entry = {"started_date": sig.date, "start_close": sig.close, "start_rsi": sig.rsi}
+    return entry
+
+
 def run_watch(dry_run: bool = False, force_notify: bool = False, price_loader=download_prices, sender=None,
               db_path=None) -> list[Signal]:  # fmt: skip
-    """ウォッチリスト全銘柄をチェック。dry_run=True なら Discord に送らない。"""
+    """ウォッチリスト全銘柄をチェック。dry_run=True なら Discord に送らず、監視状態も変えない。"""
     if sender is None:
         from .discord import send as sender
 
@@ -150,23 +214,35 @@ def run_watch(dry_run: bool = False, force_notify: bool = False, price_loader=do
             if sig is None:
                 print(f"  {item['name']} ({item['ticker']}): データ不足のためスキップ")
                 continue
-            if force_notify and not sig.reasons:
+
+            already = db.signal_already_sent(conn, sig.ticker, sig.date)
+            # 同じ日の再実行では監視状態を二重に進めない
+            rebound = _update_rebound_state(conn, sig, item, df, persist=not dry_run and not already)
+            if sig.bottom and not sig.bottom_notified:
+                print(f"  👀 {item['name']}: 下げ止まり監視中 {sig.bottom.score}/5 "
+                      f"(RSI {sig.rsi:.1f}, {sig.bottom.days_since_start}営業日目)")  # fmt: skip
+
+            if force_notify and not sig.should_notify:
                 sig.reasons = ["（テスト送信）"]
-            if not sig.is_buy:
+            if not sig.should_notify:
                 print(f"  {item['name']} ({item['ticker']}): 条件外 (RSI {sig.rsi:.1f})")
                 continue
 
             hits.append(sig)
-            if db.signal_already_sent(conn, sig.ticker, sig.date) and not force_notify:
+            if already and not force_notify:
                 print(f"  🔁 {item['name']}: {sig.date} のシグナルは通知済み")
                 continue
 
-            msg = build_message(sig, item, db.latest_evaluation(conn, item["edinet_code"]))
-            print(f"  🎯 {item['name']} ({sig.ticker}): " + " / ".join(sig.reasons))
+            msg = build_message(sig, item, db.latest_evaluation(conn, item["edinet_code"]), rebound)
+            kinds = [k for k, v in (("買い", sig.is_buy), ("下げ止まり", sig.bottom_notified),
+                                    ("売られすぎ→監視開始", sig.rebound_started)) if v]  # fmt: skip
+            print(f"  🎯 {item['name']} ({sig.ticker}): " + " / ".join(kinds))
             if not dry_run:
                 chart = generate_chart(df, f"{sig.ticker} - last 3 months")
                 sender(msg, file=chart, filename=f"{sig.ticker}_chart.png")
-            db.record_signal(conn, sig.ticker, sig.date, sig.reasons, sig.close, sig.rsi, notified=not dry_run)
+            reasons = sig.reasons + (["下げ止まり"] if sig.bottom_notified else []) + (
+                ["売られすぎ→監視開始"] if sig.rebound_started else [])  # fmt: skip
+            db.record_signal(conn, sig.ticker, sig.date, reasons, sig.close, sig.rsi, notified=not dry_run)
 
-    print(f"✨ 完了。シグナル {len(hits)} 件")
+    print(f"✨ 完了。通知対象 {len(hits)} 件")
     return hits

@@ -57,7 +57,9 @@ class Settings:
     sma_long: int = 25
     rsi_window: int = 14
     rsi_pullback_max: float = 50.0  # 上昇トレンド中の押し目判定に使う RSI 上限
-    rsi_oversold: float = 30.0  # 売られすぎ判定
+    rsi_oversold: float = 30.0  # 売られすぎ判定（これを割ると下げ止まり監視を開始）
+    bottom_min_signals: int = 3  # 下げ止まりサイン 5 つのうち、いくつそろったら通知するか
+    oversold_watch_days: int = 30  # 下げ止まり監視の最大日数（営業日）。超えたら監視終了
 
 
 settings = Settings()

@@ -60,6 +60,20 @@ CREATE TABLE IF NOT EXISTS watchlist (
     added_at    TEXT,
     updated_at  TEXT
 );
+CREATE TABLE IF NOT EXISTS oversold_watch (
+    ticker        TEXT PRIMARY KEY,
+    edinet_code   TEXT,
+    name          TEXT,
+    status        TEXT NOT NULL,   -- watching / bottomed / expired
+    started_date  TEXT,
+    start_close   REAL,
+    start_rsi     REAL,
+    low_close     REAL,
+    low_date      TEXT,
+    last_score    INTEGER,
+    ended_date    TEXT,
+    updated_at    TEXT
+);
 CREATE TABLE IF NOT EXISTS signals (
     ticker      TEXT NOT NULL,
     signal_date TEXT NOT NULL,
@@ -280,7 +294,7 @@ def record_signal(conn, ticker: str, signal_date: str, reasons: list[str], close
     )
 
 
-TABLES = ["companies", "financials", "evaluations", "watchlist", "signals"]
+TABLES = ["companies", "financials", "evaluations", "watchlist", "signals", "oversold_watch"]
 
 
 def import_sqlite(src_path: str, db_path=None) -> dict[str, int]:
@@ -310,3 +324,35 @@ def import_sqlite(src_path: str, db_path=None) -> dict[str, int]:
 def table_counts(db_path=None) -> dict[str, int]:
     with connect(db_path) as conn:
         return {t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchall()[0][0] for t in TABLES}
+
+
+# --- 売られすぎ → 下げ止まり監視 ---
+def get_rebound(conn, ticker: str) -> dict | None:
+    return _one(conn.execute("SELECT * FROM oversold_watch WHERE ticker=?", (ticker,)))
+
+
+def start_rebound(conn, item: dict, date: str, close: float, rsi: float) -> None:
+    """監視を開始（終了済みの銘柄が再び売られすぎになった場合はリセットして再開）。"""
+    conn.execute(
+        """INSERT INTO oversold_watch (ticker, edinet_code, name, status, started_date, start_close, start_rsi,
+                                       low_close, low_date, last_score, ended_date, updated_at)
+           VALUES (?, ?, ?, 'watching', ?, ?, ?, ?, ?, 0, NULL, ?)
+           ON CONFLICT(ticker) DO UPDATE SET
+             edinet_code=excluded.edinet_code, name=excluded.name, status='watching',
+             started_date=excluded.started_date, start_close=excluded.start_close, start_rsi=excluded.start_rsi,
+             low_close=excluded.low_close, low_date=excluded.low_date, last_score=0, ended_date=NULL,
+             updated_at=excluded.updated_at""",
+        (item["ticker"], item["edinet_code"], item["name"], date, close, rsi, close, date, now()),
+    )
+
+
+def update_rebound(conn, ticker: str, **fields) -> None:
+    fields["updated_at"] = now()
+    sets = ", ".join(f"{k}=?" for k in fields)
+    conn.execute(f"UPDATE oversold_watch SET {sets} WHERE ticker=?", [*fields.values(), ticker])
+
+
+def list_rebounds(conn, status: str | None = None) -> list[dict]:
+    if status:
+        return _dicts(conn.execute("SELECT * FROM oversold_watch WHERE status=? ORDER BY started_date DESC", (status,)))
+    return _dicts(conn.execute("SELECT * FROM oversold_watch ORDER BY started_date DESC"))
