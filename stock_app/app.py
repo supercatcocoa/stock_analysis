@@ -181,16 +181,45 @@ with tab_watch:
     st.write(f"ウォッチ中: {len(wl)} 銘柄（優良判定の企業が自動で入ります）")
     if wl:
         st.dataframe(pd.DataFrame(wl)[["ticker", "name", "added_at"]], hide_index=True)
+    with db.connect() as conn:
+        rebounds = db.list_rebounds(conn)
+    st.markdown("**売られすぎ → 下げ止まり監視**")
+    st.caption(
+        f"RSI が {settings.rsi_oversold:.0f} を割った銘柄を監視し、下げ止まりサイン 5 つのうち "
+        f"{settings.bottom_min_signals} つ以上がそろったら Discord に通知します（最長 {settings.oversold_watch_days} 営業日）"
+    )
+    if rebounds:
+        status_label = {"watching": "👀 監視中", "bottomed": "🔄 下げ止まり通知済み", "expired": "⌛ 期限切れ"}
+        rb = pd.DataFrame(rebounds)
+        rb["status"] = rb["status"].map(status_label)
+        rb = rb[["status", "ticker", "name", "started_date", "start_close", "start_rsi", "low_close", "low_date",
+                 "last_score", "ended_date"]].rename(columns={
+            "status": "状態", "ticker": "ticker", "name": "企業名", "started_date": "監視開始日", "start_close": "開始時終値",
+            "start_rsi": "開始時RSI", "low_close": "最安値", "low_date": "最安値日", "last_score": "サイン数(/5)",
+            "ended_date": "終了日"})  # fmt: skip
+        st.dataframe(rb, hide_index=True, use_container_width=True)
+    else:
+        st.write("現在、監視中の銘柄はありません")
+
+    def hits_table(hits):
+        rows = []
+        for h in hits:
+            kinds = [k for k, v in (("買い", h.is_buy), ("下げ止まり", h.bottom_notified),
+                                    ("売られすぎ→監視開始", h.rebound_started)) if v]  # fmt: skip
+            rows.append({"ticker": h.ticker, "日付": h.date, "終値": h.close, "RSI": round(h.rsi, 1),
+                         "種類": " / ".join(kinds), "内容": " / ".join(h.reasons + (h.bottom.met if h.bottom else []))})  # fmt: skip
+        return pd.DataFrame(rows)
+
     c1, c2 = st.columns(2)
     if c1.button("今すぐチェック（Discordに送らない）"):
         from stock_app.watcher import run_watch
 
         with st.spinner("株価をチェック中…"):
             hits = run_watch(dry_run=True)
-        st.write(pd.DataFrame([h.__dict__ for h in hits]) if hits else "シグナルはありません")
+        st.dataframe(hits_table(hits), hide_index=True) if hits else st.write("通知対象はありません")
     if c2.button("チェックして Discord に送信"):
         from stock_app.watcher import run_watch
 
         with st.spinner("株価をチェック中…"):
             hits = run_watch()
-        st.success(f"{len(hits)} 件のシグナル")
+        st.success(f"{len(hits)} 件の通知対象")
