@@ -5,7 +5,7 @@ name: daily-watch
 
 on:
   schedule:
-    - cron: "0 7 * * 1-5"
+    - cron: "13 7 * * 1-5"
   workflow_dispatch:
 
 jobs:
